@@ -1,0 +1,376 @@
+<!--
+!!html_title Camera position demo - Computer Graphics from scratch
+通过计算折射光线实现透明度效果
+-->
+<canvas id="canvas" width=600 height=600 style="border: 1px grey solid">
+
+  <script>
+
+    // ======================================================================
+    //  Low-level canvas access. 
+    // ======================================================================
+
+    var canvas = document.getElementById("canvas");
+    var canvas_context = canvas.getContext("2d");
+    var canvas_buffer = canvas_context.getImageData(0, 0, canvas.width, canvas.height);
+    var canvas_pitch = canvas_buffer.width * 4;
+
+
+    // The PutPixel() function.
+    var PutPixel = function (x, y, color) {
+      x = canvas.width / 2 + x;
+      y = canvas.height / 2 - y - 1;
+
+      if (x < 0 || x >= canvas.width || y < 0 || y >= canvas.height) {
+        return;
+      }
+
+      var offset = 4 * x + canvas_pitch * y;
+      canvas_buffer.data[offset++] = color[0];
+      canvas_buffer.data[offset++] = color[1];
+      canvas_buffer.data[offset++] = color[2];
+      canvas_buffer.data[offset++] = 255; // Alpha = 255 (full opacity)
+    }
+
+
+    // Displays the contents of the offscreen buffer into the canvas.
+    var UpdateCanvas = function () {
+      canvas_context.putImageData(canvas_buffer, 0, 0);
+    }
+
+
+    // ======================================================================
+    //  Linear algebra and helpers.
+    // ======================================================================
+
+    // Conceptually, an "infinitesimaly small" real number.
+    var EPSILON = 0.001;
+
+
+    // Dot product of two 3D vectors.
+    var DotProduct = function (v1, v2) {
+      return v1[0] * v2[0] + v1[1] * v2[1] + v1[2] * v2[2];
+    }
+
+
+    // Length of a 3D vector.
+    var Length = function (vec) {
+      return Math.sqrt(DotProduct(vec, vec));
+    }
+
+
+    // Multiplies a scalar and a vector.
+    var MultiplySV = function (k, vec) {
+      return [k * vec[0], k * vec[1], k * vec[2]];
+    }
+
+
+    // Multiplies a matrix and a vector.
+    var MultiplyMV = function (mat, vec) {
+      var result = [0, 0, 0];
+
+      for (var i = 0; i < 3; i++) {
+        for (var j = 0; j < 3; j++) {
+          result[i] += vec[j] * mat[i][j];
+        }
+      }
+
+      return result;
+    }
+
+
+    // Computes v1 + v2.
+    var Add = function (v1, v2) {
+      return [v1[0] + v2[0], v1[1] + v2[1], v1[2] + v2[2]];
+    }
+
+
+    // Computes v1 - v2.
+    var Subtract = function (v1, v2) {
+      return [v1[0] - v2[0], v1[1] - v2[1], v1[2] - v2[2]];
+    }
+
+
+    // Clamps a color to the canonical color range.
+    var Clamp = function (vec) {
+      return [Math.min(255, Math.max(0, vec[0])),
+      Math.min(255, Math.max(0, vec[1])),
+      Math.min(255, Math.max(0, vec[2]))];
+    }
+
+
+    // Computes the reflection of v1 respect to v2.
+    var ReflectRay = function (v1, v2) {
+      return Subtract(MultiplySV(2 * DotProduct(v1, v2), v2), v1);
+    }
+
+
+    // ======================================================================
+    //  A raytracer with diffuse and specular illumination, shadows and reflections,
+    // arbitrary camera position and orientation.
+    // ======================================================================
+
+    // A Sphere.
+    var Sphere = function (center, radius, color, specular, reflective, transparency, refractiveIndex) {
+      this.center = center;
+      this.radius = radius;
+      this.color = color;
+      this.specular = specular;
+      this.reflective = reflective;
+      this.transparency = transparency || 0.0;         // 默认不透明
+      this.refractiveIndex = refractiveIndex || 1.0;   // 默认空气
+    }
+
+    // A Light.
+    var Light = function (ltype, intensity, position) {
+      this.ltype = ltype;
+      this.intensity = intensity;
+      this.position = position;
+    }
+
+    Light.AMBIENT = 0;
+    Light.POINT = 1;
+    Light.DIRECTIONAL = 2;
+
+
+    // Scene setup.
+    var viewport_size = 1;
+    var projection_plane_z = 1;
+    var camera_position = [3, 0, 1];
+    /**
+     * 把原有坐标系沿着y轴顺时针旋转45°
+     * x向量发生变更后带动了z向量的变更
+    */
+    var camera_rotation = [[0.7071, 0, -0.7071],
+    [0, 1, 0],
+    [0.7071, 0, 0.7071]];
+    var background_color = [0, 0, 0];
+    var spheres = [new Sphere([0, -1, 3], 1, [255, 0, 0], 500, 0.2),
+    new Sphere([2, 0, 4], 1, [0, 0, 255], 500, 0.3),
+    new Sphere([-2, 0, 4], 1, [0, 255, 0], 10, 0.4),
+    new Sphere([0, -5001, 0], 5000, [255, 255, 0], 1000, 0.5),
+    new Sphere([1, 0, 3], 0.5, [255, 0, 255], 0, 0, 0.6, 1.1),
+    new Sphere([1, 0, 5], 1, [0, 255, 255], 10, 0.1)
+    ];
+
+    var lights = [
+      new Light(Light.AMBIENT, 0.4),
+      new Light(Light.POINT, 0.6, [2, 1, 0]),
+      new Light(Light.DIRECTIONAL, 0.2, [1, 4, 4])
+    ];
+    var recursion_depth = 3;
+
+    // Converts 2D canvas coordinates to 3D viewport coordinates.
+    var CanvasToViewport = function (p2d) {
+      return [p2d[0] * viewport_size / canvas.width,
+      p2d[1] * viewport_size / canvas.height,
+        projection_plane_z];
+    }
+
+
+    // Computes the intersection of a ray and a sphere. Returns the values
+    // of t for the intersections.
+    var IntersectRaySphere = function (origin, direction, sphere) {
+      var oc = Subtract(origin, sphere.center);
+
+      var k1 = DotProduct(direction, direction);
+      var k2 = 2 * DotProduct(oc, direction);
+      var k3 = DotProduct(oc, oc) - sphere.radius * sphere.radius;
+
+      var discriminant = k2 * k2 - 4 * k1 * k3;
+      if (discriminant < 0) {
+        return [Infinity, Infinity];
+      }
+
+      var t1 = (-k2 + Math.sqrt(discriminant)) / (2 * k1);
+      var t2 = (-k2 - Math.sqrt(discriminant)) / (2 * k1);
+      return [t1, t2];
+    }
+
+
+    var ComputeLighting = function (point, normal, view, specular) {
+      var intensity = 0;
+      var length_n = Length(normal);  // Should be 1.0, but just in case...
+      var length_v = Length(view);
+
+      for (var i = 0; i < lights.length; i++) {
+        var light = lights[i];
+        if (light.ltype == Light.AMBIENT) {
+          intensity += light.intensity;
+        } else {
+          var vec_l, t_max;
+          if (light.ltype == Light.POINT) {
+            vec_l = Subtract(light.position, point);
+            t_max = 1.0;
+          } else {  // Light.DIRECTIONAL
+            vec_l = light.position;
+            t_max = Infinity;
+          }
+
+          // Shadow check.
+          var blocker = ClosestIntersection(point, vec_l, EPSILON, t_max);
+          if (blocker) {
+            continue;
+          }
+
+          // Diffuse reflection.
+          var n_dot_l = DotProduct(normal, vec_l);
+          if (n_dot_l > 0) {
+            intensity += light.intensity * n_dot_l / (length_n * Length(vec_l));
+          }
+
+          // Specular reflection.
+          if (specular != -1) {
+            var vec_r = ReflectRay(vec_l, normal);
+            var r_dot_v = DotProduct(vec_r, view);
+            if (r_dot_v > 0) {
+              intensity += light.intensity * Math.pow(r_dot_v / (Length(vec_r) * length_v), specular);
+            }
+          }
+        }
+      }
+
+      return intensity;
+    }
+
+
+    // Find the closest intersection between a ray and the spheres in the scene.
+    var ClosestIntersection = function (origin, direction, min_t, max_t) {
+      var closest_t = Infinity;
+      var closest_sphere = null;
+
+      for (var i = 0; i < spheres.length; i++) {
+        var ts = IntersectRaySphere(origin, direction, spheres[i]);
+        if (ts[0] < closest_t && min_t < ts[0] && ts[0] < max_t) {
+          closest_t = ts[0];
+          closest_sphere = spheres[i];
+        }
+        if (ts[1] < closest_t && min_t < ts[1] && ts[1] < max_t) {
+          closest_t = ts[1];
+          closest_sphere = spheres[i];
+        }
+      }
+
+      if (closest_sphere) {
+        return [closest_sphere, closest_t];
+      }
+      return null;
+    }
+
+    /**
+     * 计算折射光线
+     * 用到的公式：
+     *    斯内尔定律：n1 * sin(theta1) = n2 * sin(theta2)
+     *    点积公式：cos(theta) = dot(v1, v2) / (|v1| * |v2|)
+     *    三角恒等式：sin(theta)^2 = 1 - cos(theta)^2
+     * 
+     * 这里入射光线朝向物体，法线朝向光源，两个向量不同起点，所以求夹角时需要取反，即先将入射光线进行反向，再求夹角
+     * 
+    */
+    function RefractRay(normal, incident, n1, n2) {
+      var ratio = n1 / n2;
+      // 计算出入射角的余弦 ==> 可以推出入射角的正弦 ==> 带入斯内尔定律可以推出反射角的正弦 ==> 反射角的余弦
+      var cosI = -DotProduct(normal, incident);
+      /**
+       * 计算折射角
+       * n1 * sin1 = n2 * sin2 ==> sin2 = n1 / n2 * sin1 = r * sin1 ==> sin2 ^ 2 = r ^ 2 * sin1 ^ 2 = r ^ 2 (1 - cos1 ^ 2)
+      */
+      var sinT2 = ratio * ratio * (1 - cosI * cosI);
+      // 如果折射角大于90度，则发生全反射
+      //  sin函数取值在[-1, 1] 理论上出现 > 1的值没有意义
+      if (sinT2 > 1) return null; // 全反射
+      var cosT = Math.sqrt(1 - sinT2);
+      /**
+       * 最终的折射光线 T
+       * T = n * L + (cosO1 - cosO2) * N
+       * 推导过程：
+       * 令 N为法向 L为入射光线 入射角O1 折射角O2 折射率为η
+       * 将L拆分为平行于N的Ln与垂直于N的Lp 即 L = Ln + Lp
+       * 由于L与N不为同方向，所以投影长度为-cosO1即Ln = -cosO1N  Lp = L + cosO1N
+       * 将折射光线T同样拆为T = Tn + Tp
+       * 根据物理规律，垂直分量Tp会按折射比率进行缩放即 Tp = η * Lp = η(L + cosO1N)
+       * 由于N与T夹角大于90° 所以投影长度 Tn = - cosO2N
+       * 所以 T = Tp + Tn = η(L + cosO1N) - cosO2N = η * L + (η * cosO1 - cosO2) * N
+      */
+      return Add(
+        MultiplySV(ratio, incident),
+        MultiplySV(ratio * cosI - cosT, normal)
+      );
+    }
+
+    // Traces a ray against the set of spheres in the scene.
+    var TraceRay = function (origin, direction, min_t, max_t, depth) {
+      var intersection = ClosestIntersection(origin, direction, min_t, max_t);
+      if (!intersection) {
+        return background_color;
+      }
+
+      var closest_sphere = intersection[0];
+      var closest_t = intersection[1];
+
+      var point = Add(origin, MultiplySV(closest_t, direction));
+      var normal = Subtract(point, closest_sphere.center);
+      normal = MultiplySV(1.0 / Length(normal), normal);
+
+      var view = MultiplySV(-1, direction);
+      var lighting = ComputeLighting(point, normal, view, closest_sphere.specular);
+      var local_color = MultiplySV(lighting, closest_sphere.color);
+
+      if (depth <= 0) {
+        return local_color;
+      }
+
+      // 反射
+      var reflected_color = [0, 0, 0];
+      if (closest_sphere.reflective > 0) {
+        var reflected_ray = ReflectRay(view, normal);
+        reflected_color = TraceRay(point, reflected_ray, EPSILON, Infinity, depth - 1);
+      }
+
+      // 折射
+      var refracted_color = [0, 0, 0];
+      if (closest_sphere.transparency > 0) {
+        var n1, n2, n;
+        if (DotProduct(direction, normal) < 0) {
+          // 从外部进入
+          n1 = 1.0;
+          n2 = closest_sphere.refractiveIndex;
+          n = normal;
+        } else {
+          // 从内部射出
+          n1 = closest_sphere.refractiveIndex;
+          n2 = 1.0;
+          n = MultiplySV(-1, normal);
+        }
+        var refracted_ray = RefractRay(n, direction, n1, n2);
+        if (refracted_ray) {
+          refracted_color = TraceRay(point, refracted_ray, EPSILON, Infinity, depth - 1);
+        }
+      }
+
+      // 加权混合：局部、反射、折射
+      var color = local_color;
+      color = Add(MultiplySV(1 - closest_sphere.reflective - closest_sphere.transparency, color),
+        MultiplySV(closest_sphere.reflective, reflected_color));
+      color = Add(color, MultiplySV(closest_sphere.transparency, refracted_color));
+      return color;
+
+    }
+
+
+    //
+    // Main loop.
+    //
+    for (var x = -canvas.width / 2; x < canvas.width / 2; x++) {
+      for (var y = -canvas.height / 2; y < canvas.height / 2; y++) {
+        var direction = CanvasToViewport([x, y])
+        direction = MultiplyMV(camera_rotation, direction);
+        var color = TraceRay(camera_position, direction, 1, Infinity, recursion_depth);
+        PutPixel(x, y, Clamp(color));
+      }
+    }
+
+    UpdateCanvas();
+
+
+  </script>
