@@ -1,8 +1,6 @@
 <!--
-!!html_title Filled triangles demo - Computer Graphics from scratch
-通过计算三角形的左右斜边确定每个y上的x最大值与最小值，然后从下到上，从左往右绘制线段，来填充三角形
+!!html_title Shaded triangles demo - Computer Graphics from scratch
 -->
-
 <canvas id="canvas" width=600 height=600 style="border: 1px grey solid">
 
   <script>
@@ -41,15 +39,26 @@
 
 
     // ======================================================================
+    //  Linear algebra and helpers.
+    // ======================================================================
+
+    // Computes k * vec.
+    var Multiply = function (k, vec) {
+      return [k * vec[0], k * vec[1], k * vec[2]];
+    }
+
+
+    // ======================================================================
     //  Rasterization code.
     // ======================================================================
 
     // A Point.
-    var Pt = function (x, y) {
-      if (!(this instanceof Pt)) { return new Pt(x, y); }
+    var Pt = function (x, y, h) {
+      if (!(this instanceof Pt)) { return new Pt(x, y, h); }
 
       this.x = x;
       this.y = y;
+      this.h = h;
     }
 
 
@@ -102,56 +111,63 @@
     }
 
 
-    var DrawFilledTriangle = function (p0, p1, p2, color) {
-      //  排序 使得 p0 < p1 < p2
+    var DrawShadedTriangle = function (p0, p1, p2, color) {
       // Sort the points from bottom to top. 
       if (p1.y < p0.y) { var swap = p0; p0 = p1; p1 = swap; }
       if (p2.y < p0.y) { var swap = p0; p0 = p2; p2 = swap; }
       if (p2.y < p1.y) { var swap = p1; p1 = p2; p2 = swap; }
 
-      // Compute X coordinates of the edges. 
-      //  计算p0 -> p1方向上x的取值 下面同理
+      // Compute X coordinates and H values of the edges. 
+      //  h为颜色深度随着y变化而变化的插值
       var x01 = Interpolate(p0.y, p0.x, p1.y, p1.x);
+      var h01 = Interpolate(p0.y, p0.h, p1.y, p1.h);
+
       var x12 = Interpolate(p1.y, p1.x, p2.y, p2.x);
+      var h12 = Interpolate(p1.y, p1.h, p2.y, p2.h);
+
       var x02 = Interpolate(p0.y, p0.x, p2.y, p2.x);
+      var h02 = Interpolate(p0.y, p0.h, p2.y, p2.h);
 
       // Merge the two short sides.
-      //  弹出x01最后一项，即 y = y1时x的取值，避免下面计算x012时出现重复的元素
       x01.pop();
-      //  表示从点p0 -> p1 -> p2这条折线上 x的取值
       var x012 = x01.concat(x12);
 
+      h01.pop();
+      var h012 = h01.concat(h12);
+
       // Determine which is left and which is right.
+      //  这里得到的x_left和x_right只是一个范围，即某一行上x的取值范围即左边界和右边界，其实是三角形边上面的值，渲染时还是需要通过遍历来创建每个点
+      //  对于h也是同理的，只能表示某一y取值下，颜色深度的范围是多少，其实还是边上面的值，不能表示三角形内部的值
       var x_left, x_right;
-      //  x02.length即为三角形最长边p0 -> p2上，x的取值，可以理解为三角形的高度, 这里取得是三角形的中点来判断左右边
+      var h_left, h_right;
       var m = (x02.length / 2) | 0;
-      //  x02[m] < x012[m] 表示三角形的折线p0 -> p1 -> p2在最长边p0 -> p2的右边，也就是三角形的左侧是一个大斜坡
-      //  这个时候对于水平线y的最小值x_left应该取最长边x02的取值 水平线的最大值x_right应该取折线x012的取值
       if (x02[m] < x012[m]) {
-        x_left = x02;
-        x_right = x012;
+        x_left = x02; x_right = x012;
+        h_left = h02; h_right = h012;
       } else {
-        x_left = x012;
-        x_right = x02;
+        x_left = x012; x_right = x02;
+        h_left = h012; h_right = h02;
       }
 
       // Draw horizontal segments.
-      //  从下往上 从左往右绘制三角形
       for (var y = p0.y; y <= p2.y; y++) {
-        for (var x = x_left[y - p0.y]; x <= x_right[y - p0.y]; x++) {
-          PutPixel(x, y, color);
+        var xl = x_left[y - p0.y] | 0;
+        var xr = x_right[y - p0.y] | 0;
+        //  根据当前y取值去读取深度边界，即这一行左右两个端点的深度值，然后进行线性插值，得到这一行每个点对应的颜色深度是多少
+        var h_segment = Interpolate(xl, h_left[y - p0.y], xr, h_right[y - p0.y]);
+
+        for (var x = xl; x <= xr; x++) {
+          PutPixel(x, y, Multiply(h_segment[x - xl], color));
         }
       }
     }
 
-    var p0 = Pt(-200, -250);
-    var p1 = Pt(200, 50);
-    var p2 = Pt(20, 250);
+    var p0 = Pt(-200, -250, 0.3);
+    var p1 = Pt(200, 50, 0.1);
+    var p2 = Pt(20, 250, 1.0);
 
-    //  绘制填充三角形
-    DrawFilledTriangle(p0, p1, p2, [0, 255, 0]);
-    //  绘制线框
-    DrawWireframeTriangle(p0, p1, p2, [0, 0, 0]);
+    DrawShadedTriangle(p0, p1, p2, [0, 255, 0]);
+    // DrawWireframeTriangle(p0, p1, p2, [0, 0, 0]);
 
     UpdateCanvas();
 
