@@ -1,9 +1,6 @@
 <!--
-!!html_title Perspective projection demo - Computer Graphics from scratch
-定义好正方体的八个点后，将三维坐标投影为二维的画布坐标后，进行渲染
-与光线追踪的区别：
-栅格化：已知三维模型的信息，倒推出应该在二维画布的哪个位置进行渲染
-光线追踪：不知道场景中有哪些物体，在每个像素发射光线判断应该渲染什么颜色
+!!html_title Scene setup demo 1 - Computer Graphics from scratch
+通过绘制三角面片来渲染正方体，即一个面由两个三角形来表示，即正方体六个面，需要绘制12个三角形
 -->
 <canvas id="canvas" width=600 height=600 style="border: 1px grey solid">
 
@@ -57,7 +54,6 @@
     // ======================================================================
 
     // Scene setup.
-    //  视口大小 如果定义为1那么x的取值[-0.5,0.5]
     var viewport_size = 1;
     var projection_plane_z = 1;
 
@@ -79,6 +75,17 @@
       this.x = x;
       this.y = y;
       this.z = z;
+    }
+
+
+    // A Triangle.
+    var Triangle = function (v0, v1, v2, color) {
+      if (!(this instanceof Triangle)) { return new Triangle(v0, v1, v2, color); }
+
+      this.v0 = v0;
+      this.v1 = v1;
+      this.v2 = v2;
+      this.color = color;
     }
 
 
@@ -124,62 +131,85 @@
     }
 
 
+    var DrawWireframeTriangle = function (p0, p1, p2, color) {
+      DrawLine(p0, p1, color);
+      DrawLine(p1, p2, color);
+      DrawLine(p0, p2, color);
+    }
+
+
     // Converts 2D viewport coordinates to 2D canvas coordinates.
     var ViewportToCanvas = function (p2d) {
       return Pt(p2d.x * canvas.width / viewport_size,
         p2d.y * canvas.height / viewport_size);
     }
 
-    /**
-     * 将物体的三维坐标转为视口的2d坐标后再转为画布坐标
-     * V(x,y,z) => P(x,y) => C(x,y)
-     * 
-     * 根据推理可得
-     * 视口坐标P(x,y) = V(x,y) * d / Vz 其中d为视口与摄像机的距离 这里会将坐标的取值范围调整到[-viewport_size/2, viewport_size/2]
-     * 画布坐标C(x,y) = P(x,y) * Cw / Vs  这里的画布坐标还是以画布中心为起点的，在PutPixel函数内部才将坐标系调整到左上角
-    */
+
     var ProjectVertex = function (v) {
       return ViewportToCanvas(Pt(v.x * projection_plane_z / v.z,
         v.y * projection_plane_z / v.z));
     }
 
 
-    var vA = Vertex(-2, -0.5, 5);
-    var vB = Vertex(-2, 0.5, 5);
-    var vC = Vertex(-1, 0.5, 5);
-    var vD = Vertex(-1, -0.5, 5);
+    var RenderTriangle = function (triangle, projected) {
+      DrawWireframeTriangle(projected[triangle.v0],
+        projected[triangle.v1],
+        projected[triangle.v2],
+        triangle.color);
+    }
 
-    var vAb = Vertex(-2, -0.5, 6);
-    var vBb = Vertex(-2, 0.5, 6);
-    var vCb = Vertex(-1, 0.5, 6);
-    var vDb = Vertex(-1, -0.5, 6);
+
+    var RenderObject = function (vertexes, triangles) {
+      var projected = [];
+      for (var i = 0; i < vertexes.length; i++) {
+        projected.push(ProjectVertex(vertexes[i]));
+      }
+      for (var i = 0; i < triangles.length; i++) {
+        RenderTriangle(triangles[i], projected);
+      }
+    }
+
+
+    var vertexes = [
+      Vertex(1, 1, 1),
+      Vertex(-1, 1, 1),
+      Vertex(-1, -1, 1),
+      Vertex(1, -1, 1),
+      Vertex(1, 1, -1),
+      Vertex(-1, 1, -1),
+      Vertex(-1, -1, -1),
+      Vertex(1, -1, -1)
+    ];
 
     var RED = [255, 0, 0];
     var GREEN = [0, 255, 0];
     var BLUE = [0, 0, 255];
+    var YELLOW = [255, 255, 0];
+    var PURPLE = [255, 0, 255];
+    var CYAN = [0, 255, 255];
 
-    //  z比较小的四个点，即前面的四个点
-    DrawLine(ProjectVertex(vA), ProjectVertex(vB), BLUE);
-    DrawLine(ProjectVertex(vB), ProjectVertex(vC), BLUE);
-    DrawLine(ProjectVertex(vC), ProjectVertex(vD), BLUE);
-    DrawLine(ProjectVertex(vD), ProjectVertex(vA), BLUE);
+    var triangles = [
+      Triangle(0, 1, 2, RED),
+      Triangle(0, 2, 3, RED),
+      Triangle(4, 0, 3, GREEN),
+      Triangle(4, 3, 7, GREEN),
+      Triangle(5, 4, 7, BLUE),
+      Triangle(5, 7, 6, BLUE),
+      Triangle(1, 5, 6, YELLOW),
+      Triangle(1, 6, 2, YELLOW),
+      Triangle(4, 5, 1, PURPLE),
+      Triangle(4, 1, 0, PURPLE),
+      Triangle(2, 6, 7, CYAN),
+      Triangle(2, 7, 3, CYAN)
+    ];
 
-    //  后面的四个点
-    DrawLine(ProjectVertex(vAb), ProjectVertex(vBb), RED);
-    DrawLine(ProjectVertex(vBb), ProjectVertex(vCb), RED);
-    DrawLine(ProjectVertex(vCb), ProjectVertex(vDb), RED);
-    DrawLine(ProjectVertex(vDb), ProjectVertex(vAb), RED);
+    for (var i = 0; i < vertexes.length; i++) {
+      vertexes[i].x -= 1.5;
+      vertexes[i].z += 7;
+    }
 
-    //  连接线
-    DrawLine(ProjectVertex(vA), ProjectVertex(vAb), GREEN);
-    DrawLine(ProjectVertex(vB), ProjectVertex(vBb), GREEN);
-    DrawLine(ProjectVertex(vC), ProjectVertex(vCb), GREEN);
-    DrawLine(ProjectVertex(vD), ProjectVertex(vDb), GREEN);
+    RenderObject(vertexes, triangles);
 
     UpdateCanvas();
 
   </script>
-
-  </body>
-
-  </html>
