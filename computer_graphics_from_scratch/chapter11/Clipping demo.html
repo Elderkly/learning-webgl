@@ -1,11 +1,12 @@
 <!--
-!!html_title Camera movement demo - Computer Graphics from scratch
-通过将物体的旋转、平移、缩放抽象为矩阵，后续的变化通过矩阵运算即可得到物体的最终位置
-这里涉及到坐标系变换，即最终所有物体都是基于相机空间进行渲染的
-参照书中10.4节的解释：
-  假设相机也附加了变换，包括平移和旋转。为了从相机的视野渲染场景，我们需要对场景的每个顶点应用相反的变换。
-
-这种实现方式相较于前面几个章节来说，相机坐标可以灵活放置，不像前面章节都是将相机放在[0,0,0]
+!!html_title Clipping demo - Computer Graphics from scratch
+这一节主要是使用平面方程：n * p + d = 0
+将视锥体抽象为五个视线平面，通过判断物体包围盒是否位于平面内，来进行裁剪渲染
+其中 n * p + d = 0 表示点p刚好在平面上
+              > 0  表示点p在平面前方，即摄像机可视区域内部，需要渲染
+              < 0  表示点p在平面后方，不需要渲染
+若物体部分需要在裁剪平面前方，部分在后方，则需要进一步处理
+通过获取三角形与裁剪平面的交点，构造出需要渲染的新的三角形
 -->
 <canvas id="canvas" width=600 height=600 style="border: 1px grey solid">
 
@@ -68,13 +69,25 @@
 
 
     // A 4D vertex (a 3D vertex in homogeneous coordinates).
-    var Vertex4 = function (x, y, z, w) {
-      if (!(this instanceof Vertex4)) { return new Vertex4(x, y, z, w); }
+    var Vertex4 = function (arg1, y, z, w) {
+      if (!(this instanceof Vertex4)) { return new Vertex4(arg1, y, z, w); }
 
-      this.x = x;
-      this.y = y;
-      this.z = z;
-      this.w = w;
+      if (arg1 instanceof Vertex) {
+        this.x = arg1.x;
+        this.y = arg1.y;
+        this.z = arg1.z;
+        this.w = 1;
+      } else if (arg1 instanceof Vertex4) {
+        this.x = arg1.x;
+        this.y = arg1.y;
+        this.z = arg1.z;
+        this.w = arg1.w;
+      } else {
+        this.x = arg1;
+        this.y = y;
+        this.z = z;
+        this.w = w;
+      }
     }
 
 
@@ -101,20 +114,17 @@
 
 
     // A Model.
-    var Model = function (vertexes, triangles) {
-      if (!(this instanceof Model)) { return new Model(vertexes, triangles); }
+    var Model = function (vertexes, triangles, bounds_center, bounds_radius) {
+      if (!(this instanceof Model)) { return new Model(vertexes, triangles, bounds_center, bounds_radius); }
 
       this.vertexes = vertexes;
       this.triangles = triangles;
+      this.bounds_center = bounds_center;
+      this.bounds_radius = bounds_radius;
     }
 
 
     // An Instance.
-    /**
-     * model: 顶点、三角面片信息
-     * position: 中心点的方位
-     * orientation: 模型在世界坐标系下的朝向
-    */
     var Instance = function (model, position, orientation, scale) {
       if (!(this instanceof Instance)) { return new Instance(model, position, orientation, scale); }
 
@@ -123,9 +133,6 @@
       this.orientation = orientation || Identity4x4;
       this.scale = scale || 1.0;
 
-      //  transform的计算应该先进行旋转、缩放变换后再进行平移变换
-      //  模型坐标系 -> 世界坐标系
-      //  旋转和缩放都是基于本地坐标系进行变换的，但是平移后得到的是场景中的绝对坐标系
       this.transform = MultiplyMM4(MakeTranslationMatrix(this.position), MultiplyMM4(this.orientation, MakeScalingMatrix(this.scale)));
     }
 
@@ -136,6 +143,17 @@
 
       this.position = position;
       this.orientation = orientation;
+      this.clipping_planes = [];
+    }
+
+
+    // A Clipping Plane.
+    //  distance平面离原点的距离
+    var Plane = function (normal, distance) {
+      if (!(this instanceof Plane)) { return new Plane(normal, distance); }
+
+      this.normal = normal;
+      this.distance = distance;
     }
 
 
@@ -149,6 +167,12 @@
     }
 
 
+    // Computes dot product.
+    var Dot = function (v1, v2) {
+      return v1.x * v2.x + v1.y * v2.y + v1.z * v2.z;
+    }
+
+
     // Computes v1 + v2.
     var Add = function (v1, v2) {
       return Vertex(v1.x + v2.x, v1.y + v2.y, v1.z + v2.z);
@@ -156,27 +180,6 @@
 
 
     // Makes a transform matrix for a rotation around the OY axis.
-    /**
-     * 齐次旋转矩阵，这里是绕着Y轴旋转的矩阵表示
-     * 入参：角度，计算cos和sin需要将度数转为弧度，例如：90°转为pi/2
-     * 在齐次旋转矩阵中，按照谁旋转，那么那个分量就不变，这里以y为轴，第二行单位向量为0,1,0
-     * 
-     * 绕y轴旋转：
-     *  [ cos, 0, -sin, 0],
-        [   0, 1,    0, 0],
-        [ sin, 0,  cos, 0],
-        [   0, 0,    0, 1]
-      绕x轴旋转:
-        [1,   0,    0, 0],
-        [0, cos, -sin, 0],
-        [0, sin,  cos, 0],
-        [0,   0,    0, 1]
-      绕z轴旋转：
-        [cos, -sin, 0, 0],
-        [sin, cos, 0, 0],
-        [  0,   0, 1, 0],
-        [  0,   0, 0, 1]
-    */
     var MakeOYRotationMatrix = function (degrees) {
       var cos = Math.cos(degrees * Math.PI / 180.0);
       var sin = Math.sin(degrees * Math.PI / 180.0);
@@ -189,7 +192,6 @@
 
 
     // Makes a transform matrix for a translation.
-    //  齐次平移矩阵，每个分量的变换体现在第四列
     var MakeTranslationMatrix = function (translation) {
       return Mat4x4([[1, 0, 0, translation.x],
       [0, 1, 0, translation.y],
@@ -199,7 +201,6 @@
 
 
     // Makes a transform matrix for a scaling.
-    //  齐次缩放矩阵，比例体现在对角线
     var MakeScalingMatrix = function (scale) {
       return Mat4x4([[scale, 0, 0, 0],
       [0, scale, 0, 0],
@@ -240,10 +241,6 @@
 
 
     // Transposes a 4x4 matrix.
-    /**
-     * 求转置矩阵，即行和列调换
-     * 对于旋转矩阵，转置矩阵等于逆矩阵
-    */
     var Transposed = function (mat) {
       var result = Mat4x4([[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]]);
       for (var i = 0; i < 4; i++) {
@@ -338,13 +335,137 @@
         triangle.color);
     }
 
+    //  求出线段AB与平面的交点
+    var Intersect = function (a, b, plane) {
+      var ab = Vertex(b.x - a.x, b.y - a.y, b.z - a.z);
+      var t = -(Dot(plane.normal, a) + plane.distance) / Dot(plane.normal, ab);
+      return Vertex(
+        a.x + t * ab.x,
+        a.y + t * ab.y,
+        a.z + t * ab.z
+      );
+    };
 
-    var RenderModel = function (model, transform) {
+
+
+    // Clips a triangle against a plane. Adds output to triangles and vertexes.
+    var ClipTriangle = function (triangle, plane, triangles, vertexes) {
+      var v0 = vertexes[triangle.v0];
+      var v1 = vertexes[triangle.v1];
+      var v2 = vertexes[triangle.v2];
+
+      /**
+       * 将三角形的每个点带入平面方程： n * p + d = 0 判断这个点是否在平面前面 需要渲染
+      */
+      var in0 = Dot(plane.normal, v0) + plane.distance > 0;
+      var in1 = Dot(plane.normal, v1) + plane.distance > 0;
+      var in2 = Dot(plane.normal, v2) + plane.distance > 0;
+
+      /**
+       * 如果三个点都不在平面前面，则不需要渲染三角形
+       * 如果三个点都在平面前面，则需要渲染三角形
+       * 如果只有一个点在平面前面，则需要对三角形进行裁剪，返回一个新的三角形
+       * 如果有两个点在平面前面，则需要对三角形进行裁剪，返回两个新的三角形
+      */
+      var in_count = in0 + in1 + in2;
+      if (in_count == 0) {
+        // Nothing to do - the triangle is fully clipped out.
+      } else if (in_count == 3) {
+        // The triangle is fully in front of the plane.
+        triangles.push(triangle);
+      }
+
+      var inside = [], outside = [];
+      var indices = [triangle.v0, triangle.v1, triangle.v2];
+      var verts = [v0, v1, v2];
+      var ins = [in0, in1, in2];
+
+      for (var i = 0; i < 3; i++) {
+        if (ins[i]) {
+          inside.push({ index: indices[i], vertex: verts[i] });
+        } else {
+          outside.push({ index: indices[i], vertex: verts[i] });
+        }
+      }
+
+      //  只有一个点需要渲染，取出两个交点后构造一个新的三角形进行渲染
+      //  将两个交点插入到顶点数组后，取出最后的两个索引进行渲染
+      if (in_count == 1) {
+        var A = inside[0].vertex;
+        var B = outside[0].vertex;
+        var C = outside[1].vertex;
+
+        var AB = Intersect(A, B, plane);
+        var AC = Intersect(A, C, plane);
+
+        var iAB = vertexes.length;
+        var iAC = vertexes.length + 1;
+        vertexes.push(AB);
+        vertexes.push(AC);
+
+        triangles.push(Triangle(inside[0].index, iAB, iAC, triangle.color));
+        //  有两个顶点A，B需要渲染，构造AC和BC查找交点后，构造两个新的三角形
+      } else if (in_count == 2) {
+        var A = inside[0].vertex;
+        var B = inside[1].vertex;
+        var C = outside[0].vertex;
+
+        var AC = Intersect(A, C, plane);
+        var BC = Intersect(B, C, plane);
+
+        var iAC = vertexes.length;
+        var iBC = vertexes.length + 1;
+        vertexes.push(AC);
+        vertexes.push(BC);
+
+        // 第一个三角形：A, B, BC
+        triangles.push(Triangle(inside[0].index, inside[1].index, iBC, triangle.color));
+        // 第二个三角形：A, BC, AC
+        triangles.push(Triangle(inside[0].index, iBC, iAC, triangle.color));
+      }
+    }
+
+    var TransformAndClip = function (clipping_planes, model, transform) {
+      // Transform the bounding sphere, and attempt early discard.
+      center = MultiplyMV(transform, Vertex4(model.bounds_center));
+      for (var p = 0; p < clipping_planes.length; p++) {
+        /**
+         * 遍历将边界球带入裁剪平面的方程： n * p + d = 0 
+         * 判断球心是否在平面上
+         * 如果 d >= 0 代表球心在平面前面，或者刚好在平面上，需要进一步区分
+         * 如果 d < 0 代表球心在平面后方，也就是在渲染区域外，那么整个物体都不需要渲染
+        */
+        var distance = Dot(clipping_planes[p].normal, center) + clipping_planes[p].distance;
+        if (distance < -model.bounds_radius) {
+          return null;
+        }
+      }
+
+      // Apply modelview transform.
+      var vertexes = [];
+      for (var i = 0; i < model.vertexes.length; i++) {
+        vertexes.push(MultiplyMV(transform, Vertex4(model.vertexes[i])));
+      }
+
+      // Clip the entire model against each successive plane.
+      //  浅拷贝
+      var triangles = model.triangles.slice();
+      for (var p = 0; p < clipping_planes.length; p++) {
+        new_triangles = []
+        for (var i = 0; i < triangles.length; i++) {
+          ClipTriangle(triangles[i], clipping_planes[p], new_triangles, vertexes);
+        }
+        triangles = new_triangles;
+      }
+
+      return Model(vertexes, triangles, center, model.bounds_radius);
+    }
+
+
+    var RenderModel = function (model) {
       var projected = [];
       for (var i = 0; i < model.vertexes.length; i++) {
-        var vertex = model.vertexes[i]
-        var vertexH = Vertex4(vertex.x, vertex.y, vertex.z, 1)
-        projected.push(ProjectVertex(MultiplyMV(transform, vertexH)));
+        projected.push(ProjectVertex(Vertex4(model.vertexes[i])));
       }
       for (var i = 0; i < model.triangles.length; i++) {
         RenderTriangle(model.triangles[i], projected);
@@ -353,26 +474,14 @@
 
 
     var RenderScene = function (camera, instances) {
-      /**
-       * Mc = Cr^t * Ct ^ -1
-       * 世界坐标系 -> 相机坐标系
-       * 
-          假设相机位于 (0, 0, -5)，朝向 +Z 方向：
-          直观理解：相机在 (0, 0, -5) 看向 +Z 方向
-          计算机实现：我们不移动相机，而是将整个世界向相反方向移动 (0, 0, +5)
-
-          这样做的结果是：
-          相机变成了坐标原点 (0, 0, 0)
-          世界中的物体都相对于相机进行了定位
-          这就是相机坐标系
-      */
       var cameraMatrix = MultiplyMM4(Transposed(camera.orientation), MakeTranslationMatrix(Multiply(-1, camera.position)));
 
       for (var i = 0; i < instances.length; i++) {
-        //  模型坐标系 -> 世界坐标系 -> 相机坐标系  所有变换都基于相机坐标系来实现，即相机就是原点
-        //  本地坐标系中的立方体 → [transform] → 世界坐标系中的立方体 → [cameraMatrix] → 相机视角下的立方体
         var transform = MultiplyMM4(cameraMatrix, instances[i].transform);
-        RenderModel(instances[i].model, transform);
+        var clipped = TransformAndClip(camera.clipping_planes, instances[i].model, transform);
+        if (clipped != null) {
+          RenderModel(clipped);
+        }
       }
     }
 
@@ -411,13 +520,31 @@
       Triangle(2, 7, 3, CYAN)
     ];
 
-    var cube = Model(vertexes, triangles);
+    //  立方体球心位于0,0,0 包围球半径根号3，即每个点到原点的距离都是根号3
+    var cube = Model(vertexes, triangles, Vertex(0, 0, 0), Math.sqrt(3));
 
-    var instances = [Instance(cube, Vertex(-1.5, 0, 7), Identity4x4, 0.75),
+    var instances = [Instance(cube, Vertex(-1.5, 0, 7), Identity4x4, 1.4),
     Instance(cube, Vertex(1.25, 2.5, 7.5), MakeOYRotationMatrix(195)),
     ];
 
     var camera = Camera(Vertex(-3, 1, 2), MakeOYRotationMatrix(-30));
+
+    var s2 = Math.sqrt(2) / 2.0;  // Used in the side planes, to make sure the length of their normals are 1.
+    camera.clipping_planes = [
+      /**
+       * 近平面给到的distance = -1
+       * 代入平面公式： n * p + d = 0 其中n为法向即(0,0,1)
+       * 解得 0 * x + 0 * y + 1 * z - 1= 0 解得 z = 1 即 z = 1处得平面为近平面
+       * 
+       * 左平面的法向为(1,0,1)，归一后为 根号2/2 其他平面同理，同时distance 给0，因为这些平面可以延伸到原点
+       * 同样带入方程: n * p + d = 0 代入点(0,0,0)得到 d = 0
+      */
+      Plane(Vertex(0, 0, 1), -1), // Near
+      Plane(Vertex(s2, 0, s2), 0), // Left
+      Plane(Vertex(-s2, 0, s2), 0), // Right
+      Plane(Vertex(0, -s2, s2), 0), // Top
+      Plane(Vertex(0, s2, s2), 0), // Bottom
+    ];
 
     RenderScene(camera, instances);
 
