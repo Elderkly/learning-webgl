@@ -1,12 +1,8 @@
 <!--
 !!html_title Clipping demo - Computer Graphics from scratch
-这一节主要是使用平面方程：n * p + d = 0
-将视锥体抽象为五个视线平面，通过判断物体包围盒是否位于平面内，来进行裁剪渲染
-其中 n * p + d = 0 表示点p刚好在平面上
-              > 0  表示点p在平面前方，即摄像机可视区域内部，需要渲染
-              < 0  表示点p在平面后方，不需要渲染
-若物体部分在裁剪平面前方，部分在后方，则需要进一步处理
-通过获取三角形与裁剪平面的交点，构造出需要渲染的新的三角形
+这里只是将绘制三角形的方法从DrawWireframeTriangle替换为DrawFilledTriangle
+即从绘制正方体线框调整为绘制填充正方体
+可以看到绘制出来的正方体很奇怪，因为没有实现遮挡逻辑，导致正方体被遮挡的部分也被绘制出来了
 -->
 <canvas id="canvas" width=600 height=600 style="border: 1px grey solid">
 
@@ -328,8 +324,50 @@
     }
 
 
+    var DrawFilledTriangle = function (p0, p1, p2, color) {
+      //  排序 使得 p0 < p1 < p2
+      // Sort the points from bottom to top. 
+      if (p1.y < p0.y) { var swap = p0; p0 = p1; p1 = swap; }
+      if (p2.y < p0.y) { var swap = p0; p0 = p2; p2 = swap; }
+      if (p2.y < p1.y) { var swap = p1; p1 = p2; p2 = swap; }
+
+      // Compute X coordinates of the edges. 
+      //  计算p0 -> p1方向上x的取值 下面同理
+      var x01 = Interpolate(p0.y, p0.x, p1.y, p1.x);
+      var x12 = Interpolate(p1.y, p1.x, p2.y, p2.x);
+      var x02 = Interpolate(p0.y, p0.x, p2.y, p2.x);
+
+      // Merge the two short sides.
+      //  弹出x01最后一项，即 y = y1时x的取值，避免下面计算x012时出现重复的元素
+      x01.pop();
+      //  表示从点p0 -> p1 -> p2这条折线上 x的取值
+      var x012 = x01.concat(x12);
+
+      // Determine which is left and which is right.
+      var x_left, x_right;
+      //  x02.length即为三角形最长边p0 -> p2上，x的取值，可以理解为三角形的高度, 这里取得是三角形的中点来判断左右边
+      var m = (x02.length / 2) | 0;
+      //  x02[m] < x012[m] 表示三角形的折线p0 -> p1 -> p2在最长边p0 -> p2的右边，也就是三角形的左侧是一个大斜坡
+      //  这个时候对于水平线y的最小值x_left应该取最长边x02的取值 水平线的最大值x_right应该取折线x012的取值
+      if (x02[m] < x012[m]) {
+        x_left = x02;
+        x_right = x012;
+      } else {
+        x_left = x012;
+        x_right = x02;
+      }
+
+      // Draw horizontal segments.
+      //  从下往上 从左往右绘制三角形
+      for (var y = p0.y; y <= p2.y; y++) {
+        for (var x = x_left[y - p0.y]; x <= x_right[y - p0.y]; x++) {
+          PutPixel(x, y, color);
+        }
+      }
+    }
+
     var RenderTriangle = function (triangle, projected) {
-      DrawWireframeTriangle(projected[triangle.v0],
+      DrawFilledTriangle(projected[triangle.v0],
         projected[triangle.v1],
         projected[triangle.v2],
         triangle.color);
