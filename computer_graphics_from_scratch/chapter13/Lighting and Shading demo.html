@@ -1,27 +1,40 @@
 <!--
-!!html_title Hidden surface removal demo - Computer Graphics from scratch
-这一节相当于对前面几个章节的总结，涵盖线性插值、实心三角形绘制、遮挡剔除、深度缓冲区等概念
-深度缓冲区通过缓存每个像素的z值，来判断当前像素是否被遮挡，即优先渲染z值小的像素，从而实现隐藏面消除
-遮挡剔除通过判断三角形是否背向摄像机，来决定是否渲染该三角形，从而实现隐藏面消除
+!!html_title Shading demo - Computer Graphics from scratch
+这一节主要是对着色方式的介绍，以及将光追部分的光照内容引入进来
+着色方式：
+  1.扁平化着色：以三角形中心点计算整个三角形的着色
+  2.高洛德着色：以三角形顶点的光照值进行线性插值 计算整个三角形的着色
+  3.冯氏着色：先对两个点之间的像素求每个像素的法线插值，然后每个像素根据自己的法线计算光照
 -->
 <center>
   <canvas id="canvas" width=600 height=600 style="border: 1px grey solid"></canvas><br>
   <table>
     <tr bgcolor="#e0e0e0">
-      <td><b>Depth buffering &<br>Backface culling</b></td>
+      <td><b>Lighting model</b></td>
       <td>
-        <input type="radio" name="depth-enabled" onClick="SetDepthEnabled(false);">Disabled</input><br>
-        <input type="radio" name="depth-enabled" onClick="SetDepthEnabled(true);" checked>Enabled</input>
+        <input type="radio" name="lighting-model" onClick="SetLightingModel(LM_DIFFUSE);">Diffuse only</input><br>
+        <input type="radio" name="lighting-model" onClick="SetLightingModel(LM_SPECULAR);">Specular only</input><br>
+        <input type="radio" name="lighting-model" onClick="SetLightingModel(LM_DIFFUSE | LM_SPECULAR);" checked>Diffuse
+        + Specular</input>
       </td>
     </tr>
+
     <tr>
-      <td colspan=2 align="center"><button onClick="ShuffleCubeTriangles();">Shuffle triangles</button>
-    </tr>
-    <tr bgcolor="#e0e0e0">
-      <td><b>Triangle outlines</b></td>
+      <td><b>Shading model</b></td>
       <td>
-        <input type="radio" name="outlines-enabled" onClick="SetOutlinesEnabled(false);" checked>Disabled</input><br>
-        <input type="radio" name="outlines-enabled" onClick="SetOutlinesEnabled(true);">Enabled</input>
+        <input type="radio" name="shading-model" onClick="SetShadingModel(SM_FLAT);">Flat</input><br>
+        <input type="radio" name="shading-model" onClick="SetShadingModel(SM_GOURAUD);">Gouraud</input><br>
+        <input type="radio" name="shading-model" onClick="SetShadingModel(SM_PHONG);" checked>Phong</input>
+      </td>
+    </tr>
+
+    <tr bgcolor="#e0e0e0">
+      <td><b>Normals</b></td>
+      <td>
+        <input type="radio" name="vertex-normals" onClick="SetUseVertexNormals(false)">Computed triangle
+        normals</input><br>
+        <input type="radio" name="vertex-normals" onClick="SetUseVertexNormals(true)" checked>Vertex normals from
+        model</input>
       </td>
     </tr>
   </table>
@@ -69,7 +82,6 @@
   depth_buffer.length = canvas.width * canvas.height;
 
   var UpdateDepthBufferIfCloser = function (x, y, inv_z) {
-    return true;
     x = canvas.width / 2 + (x | 0);
     y = canvas.height / 2 - (y | 0) - 1;
 
@@ -151,11 +163,12 @@
 
 
   // A Triangle.
-  var Triangle = function (indexes, color) {
-    if (!(this instanceof Triangle)) { return new Triangle(indexes, color); }
+  var Triangle = function (indexes, color, normals) {
+    if (!(this instanceof Triangle)) { return new Triangle(indexes, color, normals); }
 
     this.indexes = indexes;
     this.color = color;
+    this.normals = normals;
   }
 
 
@@ -202,6 +215,20 @@
   }
 
 
+  // A Light.
+  var LT_AMBIENT = 0;
+  var LT_POINT = 1;
+  var LT_DIRECTIONAL = 2;
+
+  var Light = function (type, intensity, vector) {
+    if (!(this instanceof Light)) { return new Light(type, intensity, vector); }
+
+    this.type = type;
+    this.intensity = intensity;
+    this.vector = vector;
+  }
+
+
   // ======================================================================
   //  Linear algebra and helpers.
   // ======================================================================
@@ -209,11 +236,6 @@
   // Computes k * vec.
   var Multiply = function (k, vec) {
     return Vertex(k * vec.x, k * vec.y, k * vec.z);
-  }
-
-
-  var MultiplyColor = function (k, color) {
-    return [k * color[0], k * color[1], k * color[2]];
   }
 
 
@@ -237,6 +259,11 @@
     return Vertex(v1.x + v2.x, v1.y + v2.y, v1.z + v2.z);
   }
 
+
+  // Computes vector magnitude.
+  var Magnitude = function (v1) {
+    return Math.sqrt(Dot(v1, v1));
+  }
 
   // Makes a transform matrix for a rotation around the OY axis.
   var MakeOYRotationMatrix = function (degrees) {
@@ -311,13 +338,22 @@
   }
 
 
-  var Shuffle = function (vec) {
-    for (var i = vec.length - 1; i > 0; --i) {
-      var rand = Math.floor(Math.random() * (i + 1));
-      [vec[i], vec[rand]] = [vec[rand], vec[i]];
-    }
+  var Clamp = function (value) {
+    if (value < 0) { return 0; }
+    if (value > 255) { return 255; }
+    return value;
   }
 
+
+  // Adds two colors.
+  var AddColor = function (c1, c2) {
+    return [Clamp(c1[0] + c2[0]), Clamp(c1[1] + c2[1]), Clamp(c1[2] + c2[2])];
+  }
+
+
+  var MultiplyColor = function (color, k) {
+    return [Clamp(color[0] * k), Clamp(color[1] * k), Clamp(color[2] * k)];
+  }
 
   // ======================================================================
   //  Rasterization code.
@@ -387,11 +423,30 @@
   }
 
 
+
+  // Converts 2D canvas coordinates to 2D viewport coordinates.
+  var CanvasToViewport = function (p2d) {
+    return Pt(
+      (p2d.x * viewport_size / canvas.width),
+      (p2d.y * viewport_size / canvas.height)
+    );
+  }
+
+
   var ProjectVertex = function (v) {
     return ViewportToCanvas(Pt(
       v.x * projection_plane_z / v.z,
       v.y * projection_plane_z / v.z
     ));
+  }
+
+
+  var UnProjectVertex = function (x, y, inv_z) {
+    var oz = 1.0 / inv_z;
+    var ux = x * oz / projection_plane_z;
+    var uy = y * oz / projection_plane_z;
+    var p2d = CanvasToViewport(Pt(ux, uy));
+    return Vertex(p2d.x, p2d.y, oz);
   }
 
 
@@ -407,11 +462,75 @@
     return indexes;
   }
 
+
   var ComputeTriangleNormal = function (v0, v1, v2) {
     var v0v1 = Add(v1, Multiply(-1, v0));
     var v0v2 = Add(v2, Multiply(-1, v0));
     return Cross(v0v1, v0v2);
   }
+
+
+  var ComputeIllumination = function (vertex, normal, camera, lights) {
+    var illumination = 0;
+    for (var l = 0; l < lights.length; l++) {
+      var light = lights[l];
+      //  环境光
+      if (light.type == LT_AMBIENT) {
+        illumination += light.intensity;
+        continue;
+      }
+
+      var vl;
+      //  平行光
+      if (light.type == LT_DIRECTIONAL) {
+        var cameraMatrix = Transposed(camera.orientation);
+        var rotated_light = MultiplyMV(cameraMatrix, Vertex4(light.vector));
+        vl = rotated_light;
+        //  点光源
+      } else if (light.type == LT_POINT) {
+        var cameraMatrix = MultiplyMM4(Transposed(camera.orientation), MakeTranslationMatrix(Multiply(-1, camera.position)));
+        var transformed_light = MultiplyMV(cameraMatrix, Vertex4(light.vector));
+        vl = Add(transformed_light, Multiply(-1, vertex)); // light.vector - vertex
+      }
+
+      // Diffuse component.
+      //  漫反射 判断点的法向和光源向量夹角 如果夹角小于90°，则计算漫反射
+      if (LightingModel & LM_DIFFUSE) {
+        var cos_alpha = Dot(vl, normal) / (Magnitude(vl) * Magnitude(normal));
+        if (cos_alpha > 0) {
+          illumination += cos_alpha * light.intensity;
+        }
+      }
+
+      // Specular component.
+      //  镜面反射 判断光源的反射光线和视线光线的夹角 如果夹角小于90°，则计算镜面反射
+      //  如果夹角大于90°，那么反射光线反射的光不会被摄像机捕获，所以需要排除掉
+      if (LightingModel & LM_SPECULAR) {
+        var reflected = Add(Multiply(2 * Dot(normal, vl), normal), Multiply(-1, vl));
+        var view = Add(camera.position, Multiply(-1, vertex));
+
+        var cos_beta = Dot(reflected, view) / (Magnitude(reflected) * Magnitude(view));
+        if (cos_beta > 0) {
+          //  这里的镜面反射强度默认给到50， 这个值越大，表示镜面反射越强，即反射光线越强
+          var specular = 50;
+          illumination += Math.pow(cos_beta, specular) * light.intensity;
+        }
+      }
+    }
+    return illumination;
+  }
+
+
+  var LM_DIFFUSE = 1;
+  var LM_SPECULAR = 2;
+
+  var SM_FLAT = 0;
+  var SM_GOURAUD = 1;
+  var SM_PHONG = 2;
+
+  var LightingModel = LM_DIFFUSE | LM_SPECULAR;
+  var ShadingModel = SM_PHONG;
+  var UseVertexNormals = true;
 
   var EdgeInterpolate = function (y0, v0, y1, v1, y2, v2) {
     var v01 = Interpolate(y0, v0, y1, v1);
@@ -422,12 +541,8 @@
     return [v02, v012];
   }
 
-  // Controls depth buffering and backface culling.
-  var depthChecksEnabled = true;
 
-  var drawOutlines = false;
-
-  var RenderTriangle = function (triangle, vertexes, projected) {
+  var RenderTriangle = function (triangle, vertexes, projected, camera, lights, orientation) {
     // Sort by projected point Y.
     var indexes = SortedVertexIndexes(triangle.indexes, projected);
     var [i0, i1, i2] = indexes;
@@ -440,13 +555,10 @@
     var normal = ComputeTriangleNormal(vertexes[triangle.indexes[0]], vertexes[triangle.indexes[1]], vertexes[triangle.indexes[2]]);
 
     // Backface culling.
-    if (depthChecksEnabled) {
-      //  从原点到三角形中心的向量 相当于O-C
-      var centre = Multiply(-1.0 / 3.0, Add(Add(vertexes[triangle.indexes[0]], vertexes[triangle.indexes[1]]), vertexes[triangle.indexes[2]]));
-      //  原点到三角形中心的向量与三角形的法向夹角大于90°，表示三角形背向摄像机，此时可以不渲染这个三角形，摄像机只渲染正面朝向摄像机的三角形 图12.9
-      if (Dot(centre, normal) < 0) {
-        return;
-      }
+    var centre = Multiply(-1.0 / 3.0, Add(Add(vertexes[triangle.indexes[0]], vertexes[triangle.indexes[1]]), vertexes[triangle.indexes[2]]));
+    //  如果三角形中心到原点的向量与三角形的法向夹角大于90°，则表示三角形背向摄像机，此时可以不渲染这个三角形，摄像机只渲染正面朝向摄像机的三角形 图12.9
+    if (Dot(centre, normal) < 0) {
+      return;
     }
 
     // Get attribute values (X, 1/Z) at the vertexes.
@@ -456,44 +568,102 @@
 
     // Compute attribute values at the edges.
     var [x02, x012] = EdgeInterpolate(p0.y, p0.x, p1.y, p1.x, p2.y, p2.x);
-    //  1/z的推导：12.3
-    //  这里关于z的线性插值用的是1/z 而不是z，因为z越小，表示距离摄像机越近，越需要被渲染出来，所以需要用1/z来表示z的远近
-    var [iz02, iz012] = EdgeInterpolate(p0.y, 1 / v0.z, p1.y, 1 / v1.z, p2.y, 1 / v2.z);
+    var [iz02, iz012] = EdgeInterpolate(p0.y, 1.0 / v0.z, p1.y, 1.0 / v1.z, p2.y, 1.0 / v2.z);
+
+    if (UseVertexNormals) {
+      var transform = MultiplyMM4(Transposed(camera.orientation), orientation);
+      var normal0 = MultiplyMV(transform, Vertex4(triangle.normals[i0]));
+      var normal1 = MultiplyMV(transform, Vertex4(triangle.normals[i1]));
+      var normal2 = MultiplyMV(transform, Vertex4(triangle.normals[i2]));
+    } else {
+      var normal0 = normal;
+      var normal1 = normal;
+      var normal2 = normal;
+    }
+
+    //  扁平化着色：以三角形中心点计算整个三角形的着色
+    if (ShadingModel == SM_FLAT) {
+      // Flat shading: compute lighting for the entire triangle.
+      var center = Vertex((v0.x + v1.x + v2.x) / 3.0, (v0.y + v1.y + v2.y) / 3.0, (v0.z + v1.z + v2.z) / 3.0);
+      var intensity = ComputeIllumination(center, normal0, camera, lights);
+      //  高洛德着色：以三角形顶点的光照值进行线性插值 计算整个三角形的着色
+    } else if (ShadingModel == SM_GOURAUD) {
+      // Gouraud shading: compute lighting at the vertexes, and interpolate.
+      var i0 = ComputeIllumination(v0, normal0, camera, lights);
+      var i1 = ComputeIllumination(v1, normal1, camera, lights);
+      var i2 = ComputeIllumination(v2, normal2, camera, lights);
+      var [i02, i012] = EdgeInterpolate(p0.y, i0, p1.y, i1, p2.y, i2);
+      //  冯氏着色：先对两个点之间的像素求每个像素的法线插值，然后每个像素根据自己的法线计算光照
+    } else if (ShadingModel == SM_PHONG) {
+      // Phong shading: interpolate normal vectors.
+      var [nx02, nx012] = EdgeInterpolate(p0.y, normal0.x, p1.y, normal1.x, p2.y, normal2.x);
+      var [ny02, ny012] = EdgeInterpolate(p0.y, normal0.y, p1.y, normal1.y, p2.y, normal2.y);
+      var [nz02, nz012] = EdgeInterpolate(p0.y, normal0.z, p1.y, normal1.z, p2.y, normal2.z);
+    }
 
 
     // Determine which is left and which is right.
-    //  确认对于某一个y的取值，x的左右边界
     var m = (x02.length / 2) | 0;
     if (x02[m] < x012[m]) {
       var [x_left, x_right] = [x02, x012];
       var [iz_left, iz_right] = [iz02, iz012];
+      var [i_left, i_right] = [i02, i012];
+
+      var [nx_left, nx_right] = [nx02, nx012];
+      var [ny_left, ny_right] = [ny02, ny012];
+      var [nz_left, nz_right] = [nz02, nz012];
     } else {
       var [x_left, x_right] = [x012, x02];
       var [iz_left, iz_right] = [iz012, iz02];
+      var [i_left, i_right] = [i012, i02];
+
+      var [nx_left, nx_right] = [nx012, nx02];
+      var [ny_left, ny_right] = [ny012, ny02];
+      var [nz_left, nz_right] = [nz012, nz02];
     }
+
 
     // Draw horizontal segments.
     for (var y = p0.y; y <= p2.y; y++) {
       var [xl, xr] = [x_left[y - p0.y] | 0, x_right[y - p0.y] | 0];
 
       // Interpolate attributes for this scanline.
-      //  这里再一次对z求线性插值类似于第八章的渐变三角形，确定了某个y上面左右两个x端点的z值后，再基于自变量x求z的线性插值，计算出渲染x的过程中，每个点的z值
       var [zl, zr] = [iz_left[y - p0.y], iz_right[y - p0.y]];
       var zscan = Interpolate(xl, zl, xr, zr);
 
+      if (ShadingModel == SM_GOURAUD) {
+        var [il, ir] = [i_left[y - p0.y], i_right[y - p0.y]];
+        var iscan = Interpolate(xl, il, xr, ir);
+      } else if (ShadingModel == SM_PHONG) {
+        var [nxl, nxr] = [nx_left[y - p0.y], nx_right[y - p0.y]];
+        var [nyl, nyr] = [ny_left[y - p0.y], ny_right[y - p0.y]];
+        var [nzl, nzr] = [nz_left[y - p0.y], nz_right[y - p0.y]];
+
+        var nxscan = Interpolate(xl, nxl, xr, nxr);
+        var nyscan = Interpolate(xl, nyl, xr, nyr);
+        var nzscan = Interpolate(xl, nzl, xr, nzr);
+      }
+
       for (var x = xl; x <= xr; x++) {
-        if (!depthChecksEnabled ||
-          UpdateDepthBufferIfCloser(x, y, zscan[x - xl])) {
-          PutPixel(x, y, triangle.color);
+        var inv_z = zscan[x - xl];
+        if (UpdateDepthBufferIfCloser(x, y, inv_z)) {
+
+          if (ShadingModel == SM_FLAT) {
+            // Just use the per-triangle intensity.
+          } else if (ShadingModel == SM_GOURAUD) {
+            intensity = iscan[x - xl];
+          } else if (ShadingModel == SM_PHONG) {
+            //  将像素的x, y, 1/z反投影回世界坐标系，得到像素的世界坐标
+            var vertex = UnProjectVertex(x, y, inv_z);
+            //  取出当前像素的法线信息
+            var normal = Vertex(nxscan[x - xl], nyscan[x - xl], nzscan[x - xl]);
+            //  计算当前像素的光照强度
+            var intensity = ComputeIllumination(vertex, normal, camera, lights);
+          }
+
+          PutPixel(x, y, MultiplyColor(triangle.color, intensity));
         }
       }
-    }
-
-    if (drawOutlines) {
-      var outline_color = MultiplyColor(0.75, triangle.color);
-      DrawLine(p0, p1, outline_color);
-      DrawLine(p0, p2, outline_color);
-      DrawLine(p2, p1, outline_color);
     }
   }
 
@@ -552,31 +722,94 @@
   }
 
 
-  var RenderModel = function (model) {
+  var RenderModel = function (model, camera, lights, orientation) {
     var projected = [];
     for (var i = 0; i < model.vertexes.length; i++) {
       projected.push(ProjectVertex(Vertex4(model.vertexes[i])));
     }
     for (var i = 0; i < model.triangles.length; i++) {
-      RenderTriangle(model.triangles[i], model.vertexes, projected);
+      RenderTriangle(model.triangles[i], model.vertexes, projected, camera, lights, orientation);
     }
   }
 
 
-  var RenderScene = function (camera, instances) {
+  var RenderScene = function (camera, instances, lights) {
     var cameraMatrix = MultiplyMM4(Transposed(camera.orientation), MakeTranslationMatrix(Multiply(-1, camera.position)));
 
     for (var i = 0; i < instances.length; i++) {
       var transform = MultiplyMM4(cameraMatrix, instances[i].transform);
       var clipped = TransformAndClip(camera.clipping_planes, instances[i].model, transform);
       if (clipped != null) {
-        RenderModel(clipped);
+        RenderModel(clipped, camera, lights, instances[i].orientation);
       }
     }
   }
 
 
+  // ----- Sphere model generator -----
+  /**
+   * 生成球体
+   * @params {number} divs 球体精度
+   * @params {array} color 球体颜色
+   * @returns {Model} 球体模型
+  */
+  var GenerateSphere = function (divs, color) {
+    // 顶点数组
+    var vertexes = [];
+    // 三角形数组
+    var triangles = [];
 
+    // 每个三角形的角度
+    var delta_angle = 2.0 * Math.PI / divs;
+
+    // 生成顶点和法向量
+    for (var d = 0; d < divs + 1; d++) {
+      //  三角形的y坐标 这么算是因为球体半径约束为1，所以y的取值范围为[-1, 1]
+      var y = (2.0 / divs) * (d - divs / 2);
+      // 三角形的半径 x^2 + y^2 + z^2 = 1
+      var radius = Math.sqrt(1.0 - y * y);
+      // 生成顶点
+      for (var i = 0; i < divs; i++) {
+        /**
+         * 对于xz平面上的点， 当半径为r时，x和z的取值范围为[-r, r]
+                Z轴
+                  ↑
+                  |
+             (0,r)|
+                  |
+         (-r,0)───┼───(r,0) → X轴
+                  |
+            (0,-r)|
+                  |
+
+          当θ = 0°时：   (r, 0)     → cos(0) = 1, sin(0) = 0
+          当θ = 90°时：  (0, r)     → cos(90°) = 0, sin(90°) = 1  
+          当θ = 180°时： (-r, 0)    → cos(180°) = -1, sin(180°) = 0
+          当θ = 270°时： (0, -r)    → cos(270°) = 0, sin(270°) = -1
+        */
+        var vertex = Vertex(radius * Math.cos(i * delta_angle), y, radius * Math.sin(i * delta_angle));
+        vertexes.push(vertex);
+      }
+    }
+
+    // Generate triangles.
+    for (var d = 0; d < divs; d++) {
+      for (var i = 0; i < divs; i++) {
+        var i0 = d * divs + i;
+        var i1 = (d + 1) * divs + (i + 1) % divs;
+        var i2 = divs * d + (i + 1) % divs;
+        var tri0 = [i0, i1, i2];
+        var tri1 = [i0, i0 + divs, i1];
+        triangles.push(Triangle(tri0, color, [vertexes[tri0[0]], vertexes[tri0[1]], vertexes[tri0[2]]]));
+        triangles.push(Triangle(tri1, color, [vertexes[tri1[0]], vertexes[tri1[1]], vertexes[tri1[2]]]));
+      }
+    }
+
+    return Model(vertexes, triangles, Vertex(0, 0, 0), 1.0);
+  }
+
+
+  // ----- Cube model -----
   var vertexes = [
     Vertex(1, 1, 1),
     Vertex(-1, 1, 1),
@@ -596,25 +829,29 @@
   var CYAN = [0, 255, 255];
 
   var triangles = [
-    Triangle([0, 1, 2], RED),
-    Triangle([0, 2, 3], RED),
-    Triangle([1, 5, 6], YELLOW),
-    Triangle([1, 6, 2], YELLOW),
-    Triangle([2, 6, 7], CYAN),
-    Triangle([2, 7, 3], CYAN),
-    Triangle([4, 0, 3], GREEN),
-    Triangle([4, 1, 0], PURPLE),
-    Triangle([4, 3, 7], GREEN),
-    Triangle([4, 5, 1], PURPLE),
-    Triangle([5, 4, 7], BLUE),
-    Triangle([5, 7, 6], BLUE),
+    Triangle([0, 1, 2], RED, [Vertex(0, 0, 1), Vertex(0, 0, 1), Vertex(0, 0, 1)]),
+    Triangle([0, 2, 3], RED, [Vertex(0, 0, 1), Vertex(0, 0, 1), Vertex(0, 0, 1)]),
+    Triangle([4, 0, 3], GREEN, [Vertex(1, 0, 0), Vertex(1, 0, 0), Vertex(1, 0, 0)]),
+    Triangle([4, 3, 7], GREEN, [Vertex(1, 0, 0), Vertex(1, 0, 0), Vertex(1, 0, 0)]),
+    Triangle([5, 4, 7], BLUE, [Vertex(0, 0, -1), Vertex(0, 0, -1), Vertex(0, 0, -1)]),
+    Triangle([5, 7, 6], BLUE, [Vertex(0, 0, -1), Vertex(0, 0, -1), Vertex(0, 0, -1)]),
+    Triangle([1, 5, 6], YELLOW, [Vertex(-1, 0, 0), Vertex(-1, 0, 0), Vertex(-1, 0, 0)]),
+    Triangle([1, 6, 2], YELLOW, [Vertex(-1, 0, 0), Vertex(-1, 0, 0), Vertex(-1, 0, 0)]),
+    Triangle([1, 0, 5], PURPLE, [Vertex(0, 1, 0), Vertex(0, 1, 0), Vertex(0, 1, 0)]),
+    Triangle([5, 0, 4], PURPLE, [Vertex(0, 1, 0), Vertex(0, 1, 0), Vertex(0, 1, 0)]),
+    Triangle([2, 6, 7], CYAN, [Vertex(0, -1, 0), Vertex(0, -1, 0), Vertex(0, -1, 0)]),
+    Triangle([2, 7, 3], CYAN, [Vertex(0, -1, 0), Vertex(0, -1, 0), Vertex(0, -1, 0)])
   ];
 
-  Shuffle(triangles);
-
   var cube = Model(vertexes, triangles, Vertex(0, 0, 0), Math.sqrt(3));
-  var instances = [Instance(cube, Vertex(-1.5, 0, 7), Identity4x4, 0.75),
-  Instance(cube, Vertex(1.25, 2.5, 7.5), MakeOYRotationMatrix(195)),
+  // ----------
+
+  var sphere = GenerateSphere(15, GREEN);
+
+  var instances = [
+    Instance(cube, Vertex(-1.5, 0, 7), Identity4x4, 0.75),
+    Instance(cube, Vertex(1.25, 2.5, 7.5), MakeOYRotationMatrix(195)),
+    Instance(sphere, Vertex(1.75, -0.5, 7), Identity4x4, 1.5),
   ];
 
   var camera = Camera(Vertex(-3, 1, 2), MakeOYRotationMatrix(-30));
@@ -628,19 +865,54 @@
     Plane(Vertex(0, s2, s2), 0), // Bottom
   ];
 
+  lights = [
+    Light(LT_AMBIENT, 0.2),
+    Light(LT_DIRECTIONAL, 0.2, Vertex(-1, 0, 1)),
+    Light(LT_POINT, 0.6, Vertex(-3, 2, -10))
+  ];
 
-  var ShuffleCubeTriangles = function () {
-    Shuffle(cube.triangles);
+  // ----- For the "wrong Gouraud interpolation" image -----
+  /*
+  var camera = Camera(Vertex(0, 0, 0), Identity4x4);
+  
+  var light_position = Vertex(2.25, 0, 5);
+  //var light_position = Vertex(1, 0, 5);
+  //var light_position = Vertex(0, 0, 5);
+  
+  lights = [
+    Light(LT_AMBIENT, 0.2),
+    Light(LT_POINT, 0.6, light_position)
+  ];
+  
+  
+  var triangles = [
+    Triangle([4, 0, 3], GREEN,  [Vertex(1, 0, 0), Vertex(1, 0, 0), Vertex(1, 0, 0)]),
+    Triangle([4, 3, 7], GREEN,  [Vertex(1, 0, 0), Vertex(1, 0, 0), Vertex(1, 0, 0)]),
+  ];
+  
+  var light_source = GenerateSphere(15, YELLOW);
+  
+  var face = Model(vertexes, triangles, Vertex(0, 0, 0), Math.sqrt(3));
+  
+  var instances = [
+    Instance(light_source, light_position, Identity4x4, 0.1), 
+    Instance(face, Vertex(-2, 0, 5), MakeOYRotationMatrix(-30), 1),
+  ];
+  */
+  // -----------------------------------------------------
+
+  var SetLightingModel = function (model) {
+    LightingModel = model;
     Render();
   }
 
-  var SetDepthEnabled = function (enabled) {
-    depthChecksEnabled = enabled;
+  var SetShadingModel = function (model) {
+    ShadingModel = model;
     Render();
   }
 
-  var SetOutlinesEnabled = function (enabled) {
-    drawOutlines = enabled;
+  var SetUseVertexNormals = function (use_vertex_normals) {
+    UseVertexNormals = use_vertex_normals;
     Render();
   }
 
@@ -648,7 +920,7 @@
     ClearAll();
     // This lets the browser clear the canvas before blocking to render the scene.
     setTimeout(function () {
-      RenderScene(camera, instances);
+      RenderScene(camera, instances, lights);
       UpdateCanvas();
     }, 0);
   }
