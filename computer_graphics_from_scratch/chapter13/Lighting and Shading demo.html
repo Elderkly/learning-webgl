@@ -12,9 +12,10 @@
     <tr bgcolor="#e0e0e0">
       <td><b>Lighting model</b></td>
       <td>
-        <input type="radio" name="lighting-model" onClick="SetLightingModel(LM_DIFFUSE);">Diffuse only</input><br>
+        <input type="radio" name="lighting-model" onClick="SetLightingModel(LM_DIFFUSE);" checked>Diffuse
+        only</input><br>
         <input type="radio" name="lighting-model" onClick="SetLightingModel(LM_SPECULAR);">Specular only</input><br>
-        <input type="radio" name="lighting-model" onClick="SetLightingModel(LM_DIFFUSE | LM_SPECULAR);" checked>Diffuse
+        <input type="radio" name="lighting-model" onClick="SetLightingModel(LM_DIFFUSE | LM_SPECULAR);">Diffuse
         + Specular</input>
       </td>
     </tr>
@@ -22,9 +23,9 @@
     <tr>
       <td><b>Shading model</b></td>
       <td>
-        <input type="radio" name="shading-model" onClick="SetShadingModel(SM_FLAT);">Flat</input><br>
+        <input type="radio" name="shading-model" onClick="SetShadingModel(SM_FLAT);" checked>Flat</input><br>
         <input type="radio" name="shading-model" onClick="SetShadingModel(SM_GOURAUD);">Gouraud</input><br>
-        <input type="radio" name="shading-model" onClick="SetShadingModel(SM_PHONG);" checked>Phong</input>
+        <input type="radio" name="shading-model" onClick="SetShadingModel(SM_PHONG);">Phong</input>
       </td>
     </tr>
 
@@ -59,7 +60,7 @@
 
     if (x < 0 || x >= canvas.width || y < 0 || y >= canvas.height) {
       return;
-    }
+    } 0
 
     var offset = 4 * x + canvas_pitch * y;
     canvas_buffer.data[offset++] = color[0];
@@ -99,6 +100,7 @@
 
   var ClearAll = function () {
     canvas.width = canvas.width;
+    canvas_buffer = canvas_context.getImageData(0, 0, canvas.width, canvas.height);
     depth_buffer = Array();
     depth_buffer.length = canvas.width * canvas.height;
   }
@@ -528,8 +530,8 @@
   var SM_GOURAUD = 1;
   var SM_PHONG = 2;
 
-  var LightingModel = LM_DIFFUSE | LM_SPECULAR;
-  var ShadingModel = SM_PHONG;
+  var LightingModel = LM_DIFFUSE;
+  var ShadingModel = SM_FLAT;
   var UseVertexNormals = true;
 
   var EdgeInterpolate = function (y0, v0, y1, v1, y2, v2) {
@@ -846,7 +848,7 @@
   var cube = Model(vertexes, triangles, Vertex(0, 0, 0), Math.sqrt(3));
   // ----------
 
-  var sphere = GenerateSphere(15, GREEN);
+  var sphere = GenerateSphere(150, GREEN);
 
   var instances = [
     Instance(cube, Vertex(-1.5, 0, 7), Identity4x4, 0.75),
@@ -854,7 +856,7 @@
     Instance(sphere, Vertex(1.75, -0.5, 7), Identity4x4, 1.5),
   ];
 
-  var camera = Camera(Vertex(-3, 1, 2), MakeOYRotationMatrix(-30));
+  var camera = Camera(Vertex(0, 0, -5), MakeOYRotationMatrix(0));
 
   var s2 = Math.sqrt(2) / 2.0;  // Used in the side planes, to make sure the length of their normals are 1.
   camera.clipping_planes = [
@@ -924,6 +926,195 @@
       UpdateCanvas();
     }, 0);
   }
+
+  // =======================================================================
+  //  CameraController 类（适配 Vertex/Mat4x4）
+  //  用于在canvas上实现三维相机的鼠标交互控制：
+  //    - 鼠标拖动旋转视角
+  //    - 鼠标滚轮缩放（拉近/拉远）
+  //  适配本Demo的camera结构（position为Vertex，orientation为Mat4x4）
+  // =======================================================================
+  class CameraController {
+    /**
+     * 构造函数
+     * @param {HTMLCanvasElement} canvas - 需要绑定交互的canvas
+     * @param {Object} camera - 需要控制的相机对象（必须有position和orientation属性）
+     * @param {Object} options - 可选参数（旋转/缩放速度、回调等）
+     */
+    constructor(canvas, camera, options = {}) {
+      this.canvas = canvas;
+      this.camera = camera;
+      this.options = {
+        enableZoom: true,      // 是否允许缩放
+        enableRotate: true,    // 是否允许旋转
+        zoomSpeed: 0.1,        // 缩放灵敏度
+        rotateSpeed: 0.005,    // 旋转灵敏度
+        minDistance: 2,        // 最小缩放距离
+        maxDistance: 15,       // 最大缩放距离
+        onUpdate: null,        // 相机变动时的回调（如Render）
+        ...options
+      };
+      this.isMouseDown = false;   // 鼠标是否按下
+      this.mouseButton = -1;      // 当前按下的鼠标键
+      this.lastMouseX = 0;        // 上一次鼠标X
+      this.lastMouseY = 0;        // 上一次鼠标Y
+      // 球坐标参数（用于描述相机绕原点的旋转和距离）
+      this.spherical = {
+        radius: this.getCameraRadius(), // 距离
+        theta: this.getCameraTheta(),   // 水平角
+        phi: this.getCameraPhi()        // 垂直角
+      };
+      this.target = { x: 0, y: 0, z: 0 }; // 观察目标点，默认原点
+      this.initEventListeners();          // 绑定鼠标事件
+      this.updateCameraPosition();        // 初始化相机位置
+    }
+
+    // 计算相机到目标点的距离
+    getCameraRadius() {
+      const p = this.camera.position;
+      return Math.sqrt(p.x * p.x + p.y * p.y + p.z * p.z);
+    }
+
+    // 计算相机的水平角度（绕Y轴）
+    getCameraTheta() {
+      const p = this.camera.position;
+      return Math.atan2(p.z, p.x);
+    }
+
+    // 计算相机的垂直角度（绕X轴）
+    getCameraPhi() {
+      const p = this.camera.position;
+      const r = this.getCameraRadius();
+      return Math.asin(p.y / r);
+    }
+
+    // 绑定canvas的鼠标和滚轮事件
+    initEventListeners() {
+      this.canvas.addEventListener('mousedown', (e) => this.onMouseDown(e));
+      this.canvas.addEventListener('mousemove', (e) => this.onMouseMove(e));
+      this.canvas.addEventListener('mouseup', (e) => this.onMouseUp(e));
+      this.canvas.addEventListener('mouseleave', (e) => this.onMouseUp(e));
+      this.canvas.addEventListener('wheel', (e) => this.onWheel(e));
+      this.canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+    }
+
+    // 鼠标按下事件
+    onMouseDown(event) {
+      this.isMouseDown = true;
+      this.mouseButton = event.button;
+      this.lastMouseX = event.clientX;
+      this.lastMouseY = event.clientY;
+      event.preventDefault();
+    }
+
+    // 鼠标移动事件（拖动旋转）
+    onMouseMove(event) {
+      if (!this.isMouseDown) return;
+      const deltaX = event.clientX - this.lastMouseX;
+      const deltaY = event.clientY - this.lastMouseY;
+      // 支持左键或中键旋转
+      if ((this.mouseButton === 1 || this.mouseButton === 0) && this.options.enableRotate) {
+        this.rotate(deltaX, deltaY);
+      }
+      this.lastMouseX = event.clientX;
+      this.lastMouseY = event.clientY;
+      event.preventDefault();
+    }
+
+    // 鼠标松开事件
+    onMouseUp(event) {
+      this.isMouseDown = false;
+      this.mouseButton = -1;
+      event.preventDefault();
+    }
+
+    // 鼠标滚轮事件（缩放）
+    onWheel(event) {
+      if (!this.options.enableZoom) return;
+      const delta = event.deltaY;
+      // 滚轮向前拉近，向后拉远
+      let zoomFactor = delta > 0 ? (1 + this.options.zoomSpeed) : (1 - this.options.zoomSpeed);
+      this.spherical.radius *= zoomFactor;
+      this.spherical.radius = Math.max(this.options.minDistance, Math.min(this.options.maxDistance, this.spherical.radius));
+      // 同步 viewport_size（影响投影视野）
+      viewport_size = this.spherical.radius / 5; // 经验比例，可根据实际调整
+      this.updateCameraPosition();
+      if (typeof this.options.onUpdate === 'function') this.options.onUpdate();
+      event.preventDefault();
+    }
+
+    // 旋转相机（更新球坐标参数）
+    rotate(deltaX, deltaY) {
+      this.spherical.theta += deltaX * this.options.rotateSpeed;
+      this.spherical.phi += -deltaY * this.options.rotateSpeed;
+      // 限制垂直角度，避免翻转
+      const eps = 0.01;
+      this.spherical.phi = Math.max(-Math.PI / 2 + eps, Math.min(Math.PI / 2 - eps, this.spherical.phi));
+      this.updateCameraPosition();
+      if (typeof this.options.onUpdate === 'function') this.options.onUpdate();
+    }
+
+    // 根据球坐标参数更新相机的位置和朝向
+    updateCameraPosition() {
+      // 球坐标转直角坐标
+      const r = this.spherical.radius;
+      const theta = this.spherical.theta;
+      const phi = this.spherical.phi;
+      const x = r * Math.cos(phi) * Math.cos(theta);
+      const y = r * Math.sin(phi);
+      const z = r * Math.cos(phi) * Math.sin(theta);
+      this.camera.position = Vertex(x, y, z);
+      // 计算朝向矩阵，使相机始终朝向目标点
+      this.camera.orientation = this.lookAtMatrix(this.camera.position, Vertex(0, 0, 0), Vertex(0, 1, 0));
+    }
+
+    /**
+     * 生成视图矩阵（右手坐标系）
+     * @param {Vertex} eye    相机位置
+     * @param {Vertex} target 目标点
+     * @param {Vertex} up     上方向
+     * @returns {Mat4x4}      4x4朝向矩阵
+     */
+    lookAtMatrix(eye, target, up) {
+      // 计算前向、右向、上向向量
+      const z = this.normalize(this.subtract(target, eye)); // forward
+      const x = this.normalize(this.cross(up, z));         // right
+      const y = this.cross(z, x);                          // up
+      // 构造4x4矩阵
+      return Mat4x4([
+        [x.x, y.x, z.x, eye.x],
+        [x.y, y.y, z.y, eye.y],
+        [x.z, y.z, z.z, eye.z],
+        [0, 0, 0, 1]
+      ]);
+    }
+
+    // 向量归一化
+    normalize(v) {
+      const len = Math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+      return Vertex(v.x / len, v.y / len, v.z / len);
+    }
+
+    // 向量相减
+    subtract(a, b) {
+      return Vertex(a.x - b.x, a.y - b.y, a.z - b.z);
+    }
+
+    // 向量叉乘
+    cross(a, b) {
+      return Vertex(
+        a.y * b.z - a.z * b.y,
+        a.z * b.x - a.x * b.z,
+        a.x * b.y - a.y * b.x
+      );
+    }
+  }
+  // 在 Render(); 之前初始化 CameraController
+  var cameraController = new CameraController(canvas, camera, {
+    onUpdate: function () {
+      Render();
+    }
+  });
 
   Render();
 
